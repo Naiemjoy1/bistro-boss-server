@@ -4,15 +4,16 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
 const port = process.env.PORT || 3000;
 
-//middleware
+// Middleware
 app.use(cors());
 app.use(express.json());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.ccm0dfs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -23,15 +24,13 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
-
     const userCollection = client.db("bistroDB").collection("users");
     const menuCollection = client.db("bistroDB").collection("menu");
     const reviewsCollection = client.db("bistroDB").collection("reviews");
-    const cartCollection = client.db("bistroDB").collection("catrs");
+    const cartCollection = client.db("bistroDB").collection("carts");
+    const paymentCollection = client.db("bistroDB").collection("payments");
 
-    // jwt api
+    // JWT API
     app.post("/jwt", async (req, res) => {
       const user = req.body;
       const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
@@ -40,35 +39,33 @@ async function run() {
       res.send({ token });
     });
 
-    //middlewares
+    // Middlewares
     const verifyToken = (req, res, next) => {
-      console.log("inside verify token", req.headers);
       if (!req.headers.authorization) {
-        return res.status(401).send({ message: "forbidden access" });
+        return res.status(401).send({ message: "Forbidden access" });
       }
       const token = req.headers.authorization.split(" ")[1];
       jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
         if (err) {
-          return res.status(401).send({ message: "unauthorized access" });
+          return res.status(401).send({ message: "Unauthorized access" });
         }
         req.decoded = decoded;
         next();
       });
     };
 
-    // use verify admin after verifyToken
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded.email;
       const query = { email: email };
       const user = await userCollection.findOne(query);
       const isAdmin = user?.role === "admin";
       if (!isAdmin) {
-        return res.status(403).send({ message: "forbidden access" });
+        return res.status(403).send({ message: "Forbidden access" });
       }
       next();
     };
 
-    // users
+    // Users
     app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
       const result = await userCollection.find().toArray();
       res.send(result);
@@ -78,24 +75,20 @@ async function run() {
       const email = req.params.email;
 
       if (email !== req.decoded.email) {
-        return res.status(403).send({ message: "forbidden access" });
+        return res.status(403).send({ message: "Forbidden access" });
       }
       const query = { email: email };
       const user = await userCollection.findOne(query);
-      let admin = false;
-      if (user) {
-        admin = user?.role === "admin";
-      }
+      const admin = user?.role === "admin";
       res.send({ admin });
     });
 
     app.post("/users", async (req, res) => {
       const user = req.body;
-      // insert email if user doesn't exits
       const query = { email: user.email };
       const existingUser = await userCollection.findOne(query);
       if (existingUser) {
-        return res.send({ message: "user already exits", insertedId: null });
+        return res.send({ message: "User already exists", insertedId: null });
       }
       const result = await userCollection.insertOne(user);
       res.send(result);
@@ -116,16 +109,14 @@ async function run() {
         const id = req.params.id;
         const filter = { _id: new ObjectId(id) };
         const updatedDoc = {
-          $set: {
-            role: "admin",
-          },
+          $set: { role: "admin" },
         };
         const result = await userCollection.updateOne(filter, updatedDoc);
         res.send(result);
       }
     );
 
-    // menu
+    // Menu
     app.get("/menu", async (req, res) => {
       const result = await menuCollection.find().toArray();
       res.send(result);
@@ -168,13 +159,13 @@ async function run() {
       res.send(result);
     });
 
-    // reviews
+    // Reviews
     app.get("/reviews", async (req, res) => {
       const result = await reviewsCollection.find().toArray();
       res.send(result);
     });
 
-    // carts
+    // Carts
     app.get("/carts", async (req, res) => {
       const email = req.query.email;
       const query = { email: email };
@@ -195,20 +186,73 @@ async function run() {
       res.send(result);
     });
 
-    // Send a ping to confirm a successful connection
+    // Payment intent
+    app.post("/create-payment-intent", async (req, res) => {
+      try {
+        const { price } = req.body;
+
+        // Validate price
+        if (!price || isNaN(price) || price <= 0) {
+          return res.status(400).send({ error: "Invalid price value" });
+        }
+
+        const amount = Math.round(price * 100); // Convert to smallest currency unit
+        console.log("Creating payment intent for amount (in cents):", amount);
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount,
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.error("Error creating payment intent:", error.message);
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    //payment api
+    app.post("/payments", async (req, res) => {
+      try {
+        const payment = req.body;
+        if (!payment.cartIds || !payment.cartIds.length) {
+          return res.status(400).send({ error: "Cart IDs are required" });
+        }
+
+        const paymentResult = await paymentCollection.insertOne(payment);
+        console.log("Payment info:", payment);
+
+        const query = {
+          _id: {
+            $in: payment.cartIds.map((id) => new ObjectId(id)),
+          },
+        };
+        const deleteResult = await cartCollection.deleteMany(query);
+
+        res.send({ paymentResult, deleteResult });
+      } catch (error) {
+        console.error("Error processing payment:", error);
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Uncomment to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
   } finally {
-    // Ensures that the client will close when you finish/error
+    // Uncomment to ensure the client will close when you finish/error
     // await client.close();
   }
 }
 run().catch(console.dir);
 
 app.get("/", (req, res) => {
-  res.send("boss is sitting");
+  res.send("Boss is sitting");
 });
 
 app.listen(port, () => {
