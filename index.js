@@ -215,6 +215,16 @@ async function run() {
     });
 
     //payment api
+    app.get("/payments/:email", verifyToken, async (req, res) => {
+      const email = req.params.email; // Correct the reference to req.params.email
+      if (email !== req.decoded.email) {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
+      const query = { email: email };
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    });
+
     app.post("/payments", async (req, res) => {
       try {
         const payment = req.body;
