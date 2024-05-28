@@ -24,6 +24,10 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
+    // Uncomment this to ensure MongoDB connection
+    // await client.connect();
+    console.log("Connected to MongoDB");
+
     const userCollection = client.db("bistroDB").collection("users");
     const menuCollection = client.db("bistroDB").collection("menu");
     const reviewsCollection = client.db("bistroDB").collection("reviews");
@@ -39,7 +43,7 @@ async function run() {
       res.send({ token });
     });
 
-    // Middlewares
+    // Middleware
     const verifyToken = (req, res, next) => {
       if (!req.headers.authorization) {
         return res.status(401).send({ message: "Forbidden access" });
@@ -214,9 +218,8 @@ async function run() {
       }
     });
 
-    //payment api
     app.get("/payments/:email", verifyToken, async (req, res) => {
-      const email = req.params.email; // Correct the reference to req.params.email
+      const email = req.params.email;
       if (email !== req.decoded.email) {
         return res.status(403).send({ message: "Forbidden access" });
       }
@@ -249,14 +252,81 @@ async function run() {
       }
     });
 
-    // Uncomment to confirm a successful connection
-    // await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
-  } finally {
-    // Uncomment to ensure the client will close when you finish/error
-    // await client.close();
+    app.get("/admin-stats", verifyToken, verifyAdmin, async (req, res) => {
+      const users = await userCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      const result = await paymentCollection
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+              totalRevenue: {
+                $sum: "$price",
+              },
+            },
+          },
+        ])
+        .toArray();
+      const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+      res.send({
+        users,
+        menuItems,
+        orders,
+        revenue,
+      });
+    });
+
+    // using aggregate pipeline
+    app.get("/order-stats", verifyToken, verifyAdmin, async (req, res) => {
+      const result = await paymentCollection
+        .aggregate([
+          {
+            $unwind: "$menuItemIds",
+          },
+          {
+            $addFields: {
+              menuItemId: { $toObjectId: "$menuItemIds" },
+            },
+          },
+          {
+            $lookup: {
+              from: "menu",
+              localField: "menuItemId",
+              foreignField: "_id",
+              as: "menuItems",
+            },
+          },
+          {
+            $unwind: "$menuItems",
+          },
+          {
+            $group: {
+              _id: "$menuItems.category",
+              quantity: { $sum: 1 },
+              revenue: { $sum: "$menuItems.price" },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              category: "$_id",
+              quantity: "$quantity",
+              revenue: "$revenue",
+            },
+          },
+        ])
+        .toArray();
+      res.send(result);
+    });
+
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
+  } catch (error) {
+    console.error("Failed to connect to MongoDB", error);
   }
 }
 run().catch(console.dir);
